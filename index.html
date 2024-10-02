@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <title>tiny softbody</title>
+    <script>
+      "use strict";
+
+      // ================================
+      // math utility
+      // ================================
+
+      /**
+       * @description 2 次元ベクトル
+       */
+      const vec2 = class {
+        constructor(x, y) {
+          this.x = x;
+          this.y = y;
+        }
+        copy() {
+          return new vec2(this.x, this.y);
+        }
+        add(v) {
+          this.x += v.x;
+          this.y += v.y;
+          return this;
+        }
+        sub(v) {
+          this.x -= v.x;
+          this.y -= v.y;
+          return this;
+        }
+        mul(s) {
+          this.x *= s;
+          this.y *= s;
+          return this;
+        }
+        div(s) {
+          this.x /= s;
+          this.y /= s;
+          return this;
+        }
+        len() {
+          return Math.hypot(this.x, this.y);
+        }
+        /**
+         * @description ベクトル長が 1 になるよう正規化
+         * @returns {math.vec2}
+         */
+        unit() {
+          const len = this.len();
+          if (len < 1e-6) {
+            return new vec2(1, 0);
+          }
+          return this.div(this.len());
+        }
+        /**
+         * @description ベクトルを回転
+         * @param {number} r 回転角 (rad)
+         * @returns {math.vec2}
+         */
+        rot(r) {
+          [this.x, this.y] = [
+            this.x * Math.cos(r) - this.y * Math.sin(r),
+            this.x * Math.sin(r) + this.y * Math.cos(r)
+          ];
+          return this;
+        }
+        /**
+         * @description ベクトルを 90 度単位で回転
+         * @param {number} r 回転角 (90 x deg)
+         * @returns {math.vec2}
+         */
+        rot90(r) {
+          [this.x, this.y] = [
+            [this.x, this.y],
+            [-this.y, this.x],
+            [-this.x, -this.y],
+            [this.y, -this.x]
+          ][Math.floor(r) - Math.floor(r / 4) * 4];
+          return this;
+        }
+        get_rot() {
+          return Math.atan2(this.y, this.x);
+        }
+      };
+
+      // ================================
+      // shape utility
+      // ================================
+
+      const shapes = class {
+        /**
+         * @description 任意の図形を生成
+         * @param {...number} xys x, y, x, y, ... の順に座標を指定
+         * @returns {math.vec2[]}
+         */
+        static from(...xys) {
+          console.assert(xys.length % 2 === 0, "xys.length must be even number");
+          return [...Array(xys.length / 2)]
+            .map((_, i) => (new vec2(xys[i * 2], xys[i * 2 + 1])));
+        }
+
+        /**
+         * @description 角の丸い四角形を生成
+         * @param {number} w 幅
+         * @param {number} h 高さ
+         * @param {number} r1 角の半径
+         * @param {number} r2 角の鋭さ ( r2=(2**0.5-1)*4/3 で円弧になる )
+         * @param {number} div 角の分割数 ( div >= 0 )
+         * @returns {math.vec2[]}
+         */
+        static smooth_rect(w, h, r1, r2, div) {
+          console.assert(div >= 0, "div must be non-negative");
+          const w_half = w / 2;
+          const h_half = h / 2;
+          const r = r1 * (1 - r2);
+          const corner = shapes.bezier(...shapes.from(0, r1, 0, r, r, 0, r1, 0), div);
+          const corners = [
+            corner.map(p => p.copy().rot90(0).add(new vec2(-w_half, -h_half))),
+            corner.map(p => p.copy().rot90(1).add(new vec2(+w_half, -h_half))),
+            corner.map(p => p.copy().rot90(2).add(new vec2(+w_half, +h_half))),
+            corner.map(p => p.copy().rot90(3).add(new vec2(-w_half, +h_half)))
+          ].flat();
+          return corners;
+        }
+
+        /**
+         * @description 正円を生成
+         * @param {number} r 半径
+         * @param {number} div 頂点数 ( div >= 0 )
+         */
+        static circle(r, div) {
+          console.assert(div >= 0, "div must be non-negative");
+          return [...Array(div)].map((_, i) => (
+            new vec2(r * Math.cos(2 * Math.PI * i / div), r * Math.sin(2 * Math.PI * i / div))
+          ));
+        }
+
+        /**
+         * @description ベジェ曲線を生成
+         * @param {math.vec2} p1 始点
+         * @param {math.vec2} p2 始点側の制御点
+         * @param {math.vec2} p3 終点側の制御点
+         * @param {math.vec2} p4 終点
+         * @param {number} div 分割数 ( div >= 0 )
+         * @returns {math.vec2}
+         */
+        static bezier(p1, p2, p3, p4, div) {
+          console.assert(div >= 0, "div must be non-negative");
+          return [...Array(div + 2)].map((_, i) => {
+            const t = i / (div + 1);
+            const u = 1 - t;
+            const uu = u * u;
+            const uuu = uu * u;
+            const tt = t * t;
+            const ttt = tt * t;
+            return new vec2(
+              uuu * p1.x + 3 * uu * t * p2.x + 3 * u * tt * p3.x + ttt * p4.x,
+              uuu * p1.y + 3 * uu * t * p2.y + 3 * u * tt * p3.y + ttt * p4.y
+            );
+          });
+        }
+
+        /**
+         * @description 図形の辺のうち長さが max を超えるものは max 以下になるように分割
+         * @param {math.vec2[]} shape
+         * @param {number} max ( max > 0 )
+         * @returns {math.vec2[]}
+         */
+        static limit_edge(shape, max) {
+          console.assert(max > 0, "max must be positive");
+          return shape.reduce((acc, p1, i) => {
+            acc.push(p1);
+            const p2 = shape[(i + 1) % shape.length];
+            const edge = p2.copy().sub(p1);
+            const len = p2.copy().sub(p1).len();
+            if (len > max) {
+              const div = Math.max(Math.ceil(len / max) - 1, 1);
+              const mid = [...Array(div)].map((_, j) => (
+                p1.copy().add(edge.copy().mul((j + 1) / (div + 1)))
+              ));
+              acc.push(...mid);
+            }
+            return acc;
+          }, []);
+        }
+
+        /**
+         * @description 手書き風の線に変形
+         * @param {math.vec2[]} shape
+         * @param {number} repeat 線の重ね描き回数 ( repeat >= 1 )
+         * @returns {math.vec2[][]}
+         */
+        static to_sketchy(shape, repeat) {
+          console.assert(repeat >= 1, "repeat must be positive");
+          const normal = shapes.get_points_normal(shape);
+          const sketchy = [...Array(repeat)].map((_, count) => (
+            shape.map((p, i) => {
+              // TODO: 頂点の密度によってキザギザ具合が変わってしまうので、均一なゆらぎになるようにする
+              // TODO: sin じゃなくてメルセンヌツイスターとか使いたい
+              const a = Math.sin(count * 1284.382235 + i * 10284.38238 + Math.floor(Date.now() / 100) * 1285329.0482938);
+              return p.copy().add(normal[i].mul(a * 2));
+            })
+          ));
+          return sketchy;
+        }
+
+        /**
+         * @description 重心を取得
+         * @param {math.vec2[]} shape
+         * @returns {math.vec2}
+         */
+        static get_center(shape) {
+          return shape.reduce((acc, p) => acc.add(p), new vec2(0, 0)).div(shape.length);
+        }
+
+        /**
+         * @description 点 p が図形 shape の内側にあるかどうか判定
+         * @param {math.vec2[]} shape
+         * @param {math.vec2} p
+         * @returns {boolean}
+         */
+        static contain(shape, p) {
+          let count = 0;
+          for (let i = 0; i < shape.length; i++) {
+            const [p1, p2] = [shape[i], shape[(i + 1) % shape.length]];
+            const t = (p.y - p1.y) / (p2.y - p1.y);
+            if (0 <= t && t < 1) {
+              const x = p1.x * (1 - t) + p2.x * t;
+              if (p.x < x) {
+                count++;
+              }
+            }
+          }
+          return count % 2 === 1;
+        }
+
+        /**
+         * @description 図形の各辺に対する法線ベクトルを取得
+         * @param {math.vec2[]} shape
+         * @returns {math.vec2[]}
+         */
+        static get_edges_normal(shape) {
+          return shape.map((p1, i) => {
+            const p2 = shape[(i + 1) % shape.length];
+            const edge = p2.copy().sub(p1);
+            return edge.rot90(-1).unit();
+          });
+        }
+
+        /**
+         * @description 図形の各頂点に対する法線ベクトルを取得
+         * @param {math.vec2[]} shape
+         * @returns {math.vec2[]}
+         */
+        static get_points_normal(shape) {
+          const norms = shapes.get_edges_normal(shape);
+          return norms.map((n12, i) => {
+            const n01 = norms[(i - 1 + norms.length) % norms.length];
+            const n012 = n01.add(n12).unit();
+            return n012;
+          });
+        }
+      };
+
+      // ================================
+      // physics utility
+      // ================================
+
+      /**
+       * @description 質点
+       */
+      const mass_point = class {
+        /**
+         * @param {math.vec2} p 初期座標
+         * @param {math.vec2} v 初期速度
+         * @param {number} mass 質量
+         */
+        constructor(p, v, mass) {
+          this.p = p.copy();
+          this.v = v.copy();
+          this.mass = mass;
+          this.current_force = new vec2(0, 0);
+        }
+        copy() {
+          return new mass_point(this.p, this.v, this.mass);
+        }
+        /**
+         * @description 力を加える
+         * @param {vec2} f 力
+         */
+        add_force(f) {
+          this.current_force.add(f);
+        }
+        /**
+         * @description バネによる力を加える
+         * @param {vec2} p バネのもう片方側の質点
+         * @param {number} len バネの自然長 ( len >= 0 )
+         * @param {number} k バネ定数 ( k >= 0 )
+         * @param {number} c ダンパ定数 ( c >= 0 )
+         */
+        add_spring_force(p, len, k, c) {
+          const vec = p.p.copy().sub(this.p);
+          const unit = vec.copy().unit();
+          const spring_f = unit.copy().mul(k * (vec.len() - len));
+          const dump_f = this.v.copy().sub(p.v).mul(-c);
+          this.add_force(spring_f);
+          p.add_force(spring_f.copy().mul(-1));
+          this.add_force(dump_f);
+          p.add_force(dump_f.copy().mul(-1));
+        }
+        /**
+         * @description 位置と速度を更新
+         * @param {number} dt 前フレームからの経過時間 [s]
+         */
+        update(dt) {
+          this.v.add(this.current_force.copy().mul(dt / this.mass));
+          this.p.add(this.v.copy().mul(dt));
+          this.current_force = new vec2(0, 0);
+        }
+      };
+
+      const softbody = class {
+        /**
+         * @param {math.vec2[]} shape 形状
+         * @param {number} m 質量
+         * @param {number} k バネ定数
+         * @param {number} c ダンパ定数
+         * @param {number} fric 空気抵抗
+         */
+        constructor(shape, m, k, c, fric) {
+          this.mass_shape = shape.map(p => new mass_point(p, new vec2(0, 0), m / shape.length));
+          this.points = this.mass_shape.map(p => p.copy());
+          this.k = k;
+          this.c = c;
+          this.fric = fric;
+        }
+        /**
+         * @description 位置と速度を更新
+         * @param {number} dt 前フレームからの経過時間 [s]
+         */
+        update(dt) {
+          const mass_shape_center = softbody.get_center(this.mass_shape);
+          const points_center = softbody.get_center(this.points);
+          const shape = this.mass_shape.map(p => p.p.copy().sub(mass_shape_center));
+          const points_shape = this.points.map(p => p.p.copy().sub(points_center));
+          const rads = shape.map((p, i) => Math.atan2(points_shape[i].y, points_shape[i].x) - Math.atan2(p.y, p.x));
+          const rads_avg = shapes.get_center(rads.map(r => (new vec2(Math.cos(r), Math.sin(r))))).get_rot();
+          const v = shapes.get_center(this.points.map(p => p.v));
+          const rvs = this.points.map((p, i) => {
+            const new_p = points_shape[i].copy();
+            const old_p = new_p.copy().sub(p.v).sub(v);
+            const rad = Math.atan2(new_p.y, new_p.x) - Math.atan2(old_p.y, old_p.x);
+            return rad;
+          });
+          const rv = shapes.get_center(rvs.map(r => (new vec2(Math.cos(r), Math.sin(r))))).get_rot();
+          const vs = points_shape.map((old_p, i) => {
+            const new_p = old_p.copy().rot(rv).add(v);
+            return new_p.sub(old_p);
+          });
+          const rot_shape = shape.map(p => p.copy().rot(rads_avg).add(points_center));
+          rot_shape.forEach((p, i) => {
+            const target = new mass_point(p, vs[i], this.points[i].mass);
+            this.points[i].add_spring_force(target, 0, this.k, this.c);
+            this.points[i].add_force(this.points[i].v.copy().mul(-this.fric));
+          });
+          this.points.forEach(p => p.update(dt));
+        }
+        get_shape() {
+          return this.points.map(p => p.p.copy());
+        }
+        set_shape(shape) {
+          console.assert(shape.length === this.points.length, "shape.length must be equal to initial shape");
+          this.mass_shape = shape.map((p, i) => new mass_point(p, this.mass_shape[i].v, this.mass_shape[i].mass));
+        }
+        /**
+         * @description 重心を取得
+         * @param {mass_point[]} points
+         * @returns {math.vec2}
+         */
+        static get_center(points) {
+          const mass = points.reduce((acc, p) => acc + p.mass, 0);
+          return points.reduce((acc, p) => acc.add(p.p.copy().mul(p.mass)), new vec2(0, 0)).div(mass);
+        }
+      };
+
+      // ================================
+      // draw utility
+      // ================================
+
+      const draws = class {
+        /**
+         * @description 描画ループ
+         * @param {HTMLCanvasElement} canvas
+         * @param {function} draw 描画関数
+         */
+        static draw(canvas, draw) {
+          const ctx = canvas.getContext("2d");
+          const area = new vec2(canvas.width, canvas.height);
+          const mouse = { p: new vec2(0, 0), v: new vec2(0, 0), clicked: false };
+          canvas.addEventListener("pointermove", (e) => {
+            const rect = e.target.getBoundingClientRect();
+            mouse.p = new vec2(e.clientX - rect.left, e.clientY - rect.top);
+            mouse.v = new vec2(e.movementX, e.movementY);
+          });
+          canvas.addEventListener("pointerdown", () => {
+            mouse.clicked = true;
+          });
+          canvas.addEventListener("pointerup", () => {
+            mouse.clicked = false;
+          });
+          const draw_func = draw(ctx, area, mouse);
+          let start_time = performance.now();
+          const callback = () => {
+            const dt = performance.now() - start_time;
+            draw_func(dt / 1000);
+            start_time += dt;
+            requestAnimationFrame(callback);
+          };
+          requestAnimationFrame(callback);
+        }
+
+        /**
+         * @description 図形描画
+         * @param {CanvasRenderingContext2D} ctx
+         * @param {math.vec2[]} shape
+         */
+        static shape(ctx, shape, fill, stroke, line_width) {
+          ctx.beginPath();
+          shape.forEach((p, i) => {
+            if (i === 0) {
+              ctx.moveTo(p.x, p.y);
+            } else {
+              ctx.lineTo(p.x, p.y);
+            }
+          });
+          ctx.closePath();
+          if (fill) {
+            ctx.fillStyle = fill;
+            ctx.fill();
+          }
+          if (stroke) {
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = line_width;
+            ctx.stroke();
+          }
+        }
+
+        static wireframe(ctx, shape) {
+          ctx.strokeStyle = "#333";
+          ctx.lineWidth = 1.0;
+
+          ctx.beginPath();
+          shape.forEach((p, i) => {
+            if (i === 0) {
+              ctx.moveTo(p.x, p.y);
+            } else {
+              ctx.lineTo(p.x, p.y);
+            }
+          });
+          ctx.closePath();
+          ctx.stroke();
+
+          ctx.beginPath();
+          shapes.get_points_normal(shape).forEach((n, i) => {
+            const p = shape[i];
+            const l = p.copy().add(n.mul(12));
+            ctx.moveTo(p.x, p.y);
+            ctx.lineTo(l.x, l.y);
+          });
+          ctx.stroke();
+        }
+      };
+
+      // ================================
+      // main
+      // ================================
+
+      const main = () => {
+        draws.draw(document.getElementById("canvas"), (ctx, area, mouse) => {
+          const rect = shapes.smooth_rect(200, 200, 80, 0.9, 5).map(p => p.add(area.copy().div(2)));
+          const circle = shapes.circle(120, rect.length).map(p => p.add(area.copy().div(2)));
+          // 単位
+          // - 距離 = 0.1 mm (100 px = 1 cm 程度と仮定)
+          // - 時間 = 1 s
+          // - 質量 = 1 kg
+          // 輪ゴムのバネ定数が 0.14 N/mm 程度らしいけど、 3.5 N/mm でやっと輪ゴムっぽくなった。
+          // 何かおかしいかもしれない。
+          const mass = 0.01;       //   10 g
+          const k    = 3.5 / 10;   //  3.5 N/mm
+          const c    = 0.05 / 10;  // 0.05 Ns/mm
+          const fric = 0.01 / 10;  // 0.01 Ns/mm
+          const s = new softbody(rect, mass, k, c, fric);
+
+          return (dt) => {
+            ctx.fillStyle = "#eee";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            if (mouse.clicked) {
+              s.points[0].p = mouse.p.copy();
+              s.points[0].v = mouse.v.copy();
+            }
+            if (shapes.contain(s.get_shape(), mouse.p) || mouse.clicked) {
+              s.set_shape(circle);
+            } else {
+              s.set_shape(rect);
+            }
+            s.update(dt);
+            const shape = s.get_shape();
+            shapes.to_sketchy(shape, 2).forEach((shape, i) => {
+              draws.shape(ctx, shape, (i === 1) ? "#333" : null, "#555", 5);
+            });
+            //draws.wireframe(ctx, shape);
+
+            draws.shape(ctx, shapes.circle(6, 12).map(p => p.add(mouse.p)), "#F00");
+          };
+        });
+      };
+
+      document.addEventListener("DOMContentLoaded", main);
+    </script>
+  </head>
+  <body>
+    <canvas id="canvas" width="640" height="480" style="touch-action: none;"></canvas>
+  </body>
+</html>
