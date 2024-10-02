@@ -303,13 +303,18 @@
          */
         add_spring_force(p, len, k, c) {
           const vec = p.p.copy().sub(this.p);
+          const vec_len = vec.len();
           const unit = vec.copy().unit();
-          const spring_f = unit.copy().mul(k * (vec.len() - len));
-          const dump_f = this.v.copy().sub(p.v).mul(-c);
-          this.add_force(spring_f);
-          p.add_force(spring_f.copy().mul(-1));
-          this.add_force(dump_f);
-          p.add_force(dump_f.copy().mul(-1));
+          let f = 0;
+          if (k > 0) {
+            f += k * (vec_len - len)
+          }
+          if (c > 0) {
+            const pre_vec_len = p.p.copy().sub(p.v).sub(this.p.copy().sub(this.v)).len();
+            f -= c * (vec_len - pre_vec_len);
+          }
+          this.add_force(unit.copy().mul(f));
+          p.add_force(unit.copy().mul(-f));
         }
         /**
          * @description 位置と速度を更新
@@ -363,7 +368,8 @@
           const rot_shape = shape.map(p => p.copy().rot(rads_avg).add(points_center));
           rot_shape.forEach((p, i) => {
             const target = new mass_point(p, vs[i], this.points[i].mass);
-            this.points[i].add_spring_force(target, 0, this.k, this.c);
+            this.points[i].add_spring_force(target, 0, this.k, 0);
+            this.points[i].add_force(this.points[i].v.copy().sub(vs[i]).mul(-this.c));
             this.points[i].add_force(this.points[i].v.copy().mul(-this.fric));
           });
           this.points.forEach(p => p.update(dt));
