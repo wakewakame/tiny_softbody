@@ -18,32 +18,39 @@
           this.x = x;
           this.y = y;
         }
+
         copy() {
           return new vec2(this.x, this.y);
         }
+
         add(v) {
           this.x += v.x;
           this.y += v.y;
           return this;
         }
+
         sub(v) {
           this.x -= v.x;
           this.y -= v.y;
           return this;
         }
+
         mul(s) {
           this.x *= s;
           this.y *= s;
           return this;
         }
+
         div(s) {
           this.x /= s;
           this.y /= s;
           return this;
         }
+
         len() {
           return Math.hypot(this.x, this.y);
         }
+
         /**
          * @description ベクトル長が 1 になるよう正規化
          * @returns {math.vec2}
@@ -55,6 +62,7 @@
           }
           return this.div(this.len());
         }
+
         /**
          * @description ベクトルを回転
          * @param {number} r 回転角 (rad)
@@ -67,6 +75,7 @@
           ];
           return this;
         }
+
         /**
          * @description ベクトルを 90 度単位で回転
          * @param {number} r 回転角 (90 x deg)
@@ -81,8 +90,43 @@
           ][Math.floor(r) - Math.floor(r / 4) * 4];
           return this;
         }
+
         get_rot() {
           return Math.atan2(this.y, this.x);
+        }
+
+        /**
+         * @description 直線と直線の交点を取得
+         * @param {math.vec2} ap 1 つめの直線上の任意の点
+         * @param {math.vec2} av 1 つめの直線の方向ベクトル
+         * @param {math.vec2} bp 2 つめの直線上の任意の点
+         * @param {math.vec2} bv 2 つめの直線の方向ベクトル
+         * @returns {number} 1 つめの直線上の位置 s ( 交点の座標は ap + s * av で求まる )
+         */
+        static intersection(ap, av, bp, bv) {
+          //            ap + s*av = bp + t*bv
+          // <=>      s*av - t*bv = bp - ap
+          // <=> [av bv] [s -t]^T = bp - ap
+          // <=>         [s -t]^T = [av bv]^-1 (bp - ap)
+          const bpap = bp.copy().sub(ap);
+          const det = av.x * bv.y - av.y * bv.x;
+          const s = (bv.y * bpap.x - bv.x * bpap.y) / det;
+          return s;
+        }
+
+        /**
+         * @description 点 p に最も近い線分上の点を取得
+         * @param {math.vec2} lp 線分の端点
+         * @param {math.vec2} lv 線分の方向ベクトル
+         * @param {math.vec2} p 点
+         * @returns {number} 線分上の位置 s ( 線分上の点は lp + s * lv で求まる )
+         */
+        static nearest(lp, lv, p) {
+          const s = vec2.intersection(lp, lv, p, lv.copy().rot90(1));
+          if (Number.isNaN(s)) {
+            return 0;
+          }
+          return Math.max(0, Math.min(1, s));
         }
       };
 
@@ -263,6 +307,30 @@
             return n012;
           });
         }
+
+        /**
+         * @description 点 p に最も近い図形上の点を取得
+         * @param {math.vec2[]} shape
+         * @param {math.vec2} p
+         * @returns {number[]} [最も近い辺のインデックス, 辺上の位置 s]
+         */
+        static nearest_index(shape, p) {
+          let min_dist = Infinity;
+          let min_index = -1;
+          let min_s = 0;
+          for (let i = 0; i < shape.length; i++) {
+            const lp = shape[i];
+            const lv = shape[(i + 1) % shape.length].copy().sub(lp);
+            const s = vec2.nearest(lp, lv, p);
+            const dist = p.copy().sub(lp.copy().add(lv.copy().mul(s))).len();
+            if (dist < min_dist) {
+              min_dist = dist;
+              min_index = i;
+              min_s = s;
+            }
+          }
+          return [min_index, min_s];
+        }
       };
 
       // ================================
@@ -284,9 +352,11 @@
           this.mass = mass;
           this.current_force = new vec2(0, 0);
         }
+
         copy() {
           return new mass_point(this.p, this.v, this.mass);
         }
+
         /**
          * @description 力を加える
          * @param {vec2} f 力
@@ -294,6 +364,7 @@
         add_force(f) {
           this.current_force.add(f);
         }
+
         /**
          * @description バネによる力を加える
          * @param {vec2} p バネのもう片方側の質点
@@ -316,6 +387,7 @@
           this.add_force(unit.copy().mul(f));
           p.add_force(unit.copy().mul(-f));
         }
+
         /**
          * @description 位置と速度を更新
          * @param {number} dt 前フレームからの経過時間 [s]
@@ -342,6 +414,7 @@
           this.c = c;
           this.fric = fric;
         }
+
         /**
          * @description 位置と速度を更新
          * @param {number} dt 前フレームからの経過時間 [s]
@@ -374,9 +447,11 @@
           });
           this.points.forEach(p => p.update(dt));
         }
+
         get_shape() {
           return this.points.map(p => p.p.copy());
         }
+
         set_shape(shape) {
           console.assert(shape.length === this.points.length, "shape.length must be equal to initial shape");
           this.mass_shape = shape.map((p, i) => new mass_point(p, this.mass_shape[i].v, this.mass_shape[i].mass));
@@ -405,17 +480,18 @@
         static draw(canvas, draw) {
           const ctx = canvas.getContext("2d");
           const area = new vec2(canvas.width, canvas.height);
-          const mouse = { p: new vec2(0, 0), v: new vec2(0, 0), clicked: false };
+          const mouse = { p: new vec2(0, 0), v: new vec2(0, 0), pressed: false, clicked: false };
           canvas.addEventListener("pointermove", (e) => {
             const rect = e.target.getBoundingClientRect();
             mouse.p = new vec2(e.clientX - rect.left, e.clientY - rect.top);
             mouse.v = new vec2(e.movementX, e.movementY);
           });
           canvas.addEventListener("pointerdown", () => {
+            mouse.pressed = true;
             mouse.clicked = true;
           });
           canvas.addEventListener("pointerup", () => {
-            mouse.clicked = false;
+            mouse.pressed = false;
           });
           const draw_func = draw(ctx, area, mouse);
           let start_time = performance.now();
@@ -423,6 +499,7 @@
             const dt = performance.now() - start_time;
             draw_func(dt / 1000);
             start_time += dt;
+            mouse.clicked = false;
             requestAnimationFrame(callback);
           };
           requestAnimationFrame(callback);
@@ -500,20 +577,25 @@
           const fric = 0.01 / 10;  // 0.01 Ns/mm
           const s = new softbody(rect, mass, k, c, fric);
 
+          let hold_index = null;
           return (dt) => {
             ctx.fillStyle = "#eee";
             ctx.fillRect(0, 0, canvas.width, canvas.height);
-            if (mouse.clicked) {
-              s.points[0].p = mouse.p.copy();
-              s.points[0].v = mouse.v.copy();
+            if (hold_index !== null) {
+              s.points[hold_index].p = mouse.p.copy();
+              s.points[hold_index].v = mouse.v.copy();
             }
-            if (shapes.contain(s.get_shape(), mouse.p) || mouse.clicked) {
+            if (shapes.contain(s.get_shape(), mouse.p) || mouse.pressed) {
               s.set_shape(circle);
             } else {
               s.set_shape(rect);
             }
             s.update(dt);
             const shape = s.get_shape();
+            const [index, ps] = shapes.nearest_index(shape, mouse.p);
+            const nearest = shape[index].copy().add(shape[(index + 1) % shape.length].copy().sub(shape[index]).mul(ps));
+            hold_index = mouse.clicked ? Math.round(index % shape.length) : !mouse.pressed ? null : hold_index;
+
             shapes.to_sketchy(shape, 2).forEach((shape, i) => {
               draws.shape(ctx, shape, (i === 1) ? "#333" : null, "#555", 5);
             });
