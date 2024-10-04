@@ -331,6 +331,53 @@
           }
           return [min_index, min_s];
         }
+
+        /**
+         * @description 2 つの図形の互いに重なっている頂点のインデックスを取得
+         * @param {math.vec2[]} shape1
+         * @param {math.vec2[]} shape2
+         * @returns {number[][]} [shape1 のインデックス, shape2 のインデックス]
+         */
+        static get_conflict_indices (shape1, shape2) {
+          const indices1 = shape1.reduce((acc, p, i) => {
+            if (shapes.contain(shape2, p)) {
+              acc.push(i);
+            }
+            return acc;
+          }, []);
+          const indices2 = shape2.reduce((acc, p, i) => {
+            if (shapes.contain(shape1, p)) {
+              acc.push(i);
+            }
+            return acc;
+          }, []);
+          return [indices1, indices2];
+        }
+
+        /**
+         * @description 2 つの図形の互いに重なっている頂点を解消した図形を取得
+         * @param {math.vec2[]} shape1
+         * @param {math.vec2[]} shape2
+         * @returns {math.vec2[][]} [new_shape1, new_shape2]
+         */
+        static adjust_conflict_shapes(shape1, shape2) {
+          let shape1_ = shape1.map(p => p.copy());
+          let shape2_ = shape2.map(p => p.copy());
+          const [indices1, indices2] = shapes.get_conflict_indices(shape1, shape2);
+          indices1.forEach(i => {
+            const p = shape1[i];
+            const [ni, s] = shapes.nearest_index(shape2, p);
+            const np = shape2[ni].copy().add(shape2[(ni + 1) % shape2.length].copy().sub(shape2[ni]).mul(s));
+            shape1_[i] = np.copy().add(p.copy().sub(np).mul(0.5));
+          });
+          indices2.forEach(i => {
+            const p = shape2[i];
+            const [ni, s] = shapes.nearest_index(shape1, p);
+            const np = shape1[ni].copy().add(shape1[(ni + 1) % shape1.length].copy().sub(shape1[ni]).mul(s));
+            shape2_[i] = np.copy().add(p.copy().sub(np).mul(0.5));
+          });
+          return [shape1_, shape2_];
+        }
       };
 
       // ================================
@@ -465,6 +512,18 @@
           const mass = points.reduce((acc, p) => acc + p.mass, 0);
           return points.reduce((acc, p) => acc.add(p.p.copy().mul(p.mass)), new vec2(0, 0)).div(mass);
         }
+
+        adjust_conflict(other) {
+          const shape1 = this.get_shape();
+          const shape2 = other.get_shape();
+          const [new_shape1, new_shape2] = shapes.adjust_conflict_shapes(shape1, shape2);
+          this.points.forEach((p, i) => {
+            p.p = new_shape1[i];
+          });
+          other.points.forEach((p, i) => {
+            p.p = new_shape2[i];
+          });
+        }
       };
 
       // ================================
@@ -531,8 +590,8 @@
           }
         }
 
-        static wireframe(ctx, shape) {
-          ctx.strokeStyle = "#333";
+        static wireframe(ctx, shape, color) {
+          ctx.strokeStyle = color;
           ctx.lineWidth = 1.0;
 
           ctx.beginPath();
@@ -561,7 +620,44 @@
       // main
       // ================================
 
+
       const main = () => {
+        /*
+        draws.draw(document.getElementById("canvas"), (ctx, area, mouse) => {
+          //const shape1 = shapes.smooth_rect(200, 200, 80, 0.9, 5);
+          //const shape1 = shapes.from(
+          //  -1, -1, 1, -1, 1, 1, -1, 1,
+          //  -1, -0.5, 0, -0.5, 0, -0.8, -1, -0.8
+          //).map(p => p.mul(100));
+          const shape1 = shapes.from(
+            -1, -1, 0, 1, 1, -1, 0, -0.5
+          ).map(p => p.mul(100));
+          const shape2 = shape1.map(p => p.copy().rot(Math.PI * -0.1));
+          //const shape2 = shape1.map(p => p.copy());
+          return (dt) => {
+            ctx.fillStyle = "#eee";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const s1 = shape1.map(p => p.copy().add(area.copy().div(2)));
+            const s2 = shape2.map(p => p.copy().add(mouse.p));
+            const [s1_, s2_] = shapes.adjust_conflict_shapes(s1, s2);
+            draws.wireframe(ctx, s1, "#F003");
+            draws.wireframe(ctx, s2, "#00F3");
+            draws.wireframe(ctx, s1_, "#F00");
+            draws.wireframe(ctx, s2_, "#00F");
+
+            const [indices1, indices2] = shapes.get_conflict_indices(s1, s2);
+            indices1.forEach(i => {
+              draws.shape(ctx, shapes.circle(6, 12).map(p => p.add(s1[i])), "#F00");
+            });
+            indices2.forEach(i => {
+              draws.shape(ctx, shapes.circle(6, 12).map(p => p.add(s2[i])), "#00F");
+            });
+          };
+        });
+        return;
+        */
+
         draws.draw(document.getElementById("canvas"), (ctx, area, mouse) => {
           const rect = shapes.smooth_rect(200, 200, 80, 0.9, 5).map(p => p.add(area.copy().div(2)));
           const circle = shapes.circle(120, rect.length).map(p => p.add(area.copy().div(2)));
@@ -575,31 +671,60 @@
           const k    = 3.5 / 10;   //  3.5 N/mm
           const c    = 0.05 / 10;  // 0.05 Ns/mm
           const fric = 0.01 / 10;  // 0.01 Ns/mm
-          const s = new softbody(rect, mass, k, c, fric);
+          const ss = [
+            new softbody(rect.map(p => p.add(new vec2(-150, 0))), mass, k, c, fric),
+            new softbody(rect.map(p => p.add(new vec2(150, 0))), mass, k, c, fric),
+            new softbody(rect.map(p => p.add(new vec2(0, 150))), mass, k, c, fric)
+          ];
 
-          let hold_index = null;
+          let hold = null;
           return (dt) => {
             ctx.fillStyle = "#eee";
             ctx.fillRect(0, 0, canvas.width, canvas.height);
-            if (hold_index !== null) {
-              s.points[hold_index].p = mouse.p.copy();
-              s.points[hold_index].v = mouse.v.copy();
+            if (hold !== null) {
+              ss[hold.si].points[hold.pi].p = mouse.p.copy();
+              ss[hold.si].points[hold.pi].v = mouse.v.copy();
             }
-            if (shapes.contain(s.get_shape(), mouse.p) || mouse.pressed) {
-              s.set_shape(circle);
-            } else {
-              s.set_shape(rect);
-            }
-            s.update(dt);
-            const shape = s.get_shape();
-            const [index, ps] = shapes.nearest_index(shape, mouse.p);
-            const nearest = shape[index].copy().add(shape[(index + 1) % shape.length].copy().sub(shape[index]).mul(ps));
-            hold_index = mouse.clicked ? Math.round(index % shape.length) : !mouse.pressed ? null : hold_index;
-
-            shapes.to_sketchy(shape, 2).forEach((shape, i) => {
-              draws.shape(ctx, shape, (i === 1) ? "#333" : null, "#555", 5);
+            let hold_shape = 0;
+            let hold_index = 0;
+            let hold_near = Infinity;
+            ss.forEach((s, i) => {
+              //if (shapes.contain(s.get_shape(), mouse.p) || mouse.pressed) {
+              //  s.set_shape(circle);
+              //} else {
+              //  s.set_shape(rect);
+              //}
+              const shape = s.get_shape();
+              const [index, ps] = shapes.nearest_index(shape, mouse.p);
+              const nearest = shape[index].copy().add(shape[(index + 1) % shape.length].copy().sub(shape[index]).mul(ps));
+              if (nearest.copy().sub(mouse.p).len() < hold_near) {
+                hold_near = nearest.copy().sub(mouse.p).len();
+                hold_index = index;
+                hold_shape = i;
+              }
+              s.points.forEach((p, j) => {
+                p.add_force(new vec2(0, 980 * p.mass));
+              });
             });
-            //draws.wireframe(ctx, shape);
+            ss.forEach(s => s.update(dt));
+            ss.forEach((s, i) => {
+              s.adjust_conflict(ss[(i + 1) % ss.length])
+              s.points.forEach((p, j) => {
+                p.p.x = Math.max(0, Math.min(area.x, p.p.x));
+                p.p.y = Math.max(0, Math.min(area.y, p.p.y));
+              });
+            });
+            hold = mouse.clicked ? {
+              "si": hold_shape,
+              "pi": Math.round(hold_index % ss[hold_shape].get_shape().length)
+            } : !mouse.pressed ? null : hold;
+
+            ss.forEach(s => {
+              //shapes.to_sketchy(s.get_shape(), 2).forEach((shape, i) => {
+              //  draws.shape(ctx, shape, (i === 1) ? "#333" : null, "#555", 5);
+              //});
+              draws.wireframe(ctx, s.get_shape(), "#333");
+            });
 
             draws.shape(ctx, shapes.circle(6, 12).map(p => p.add(mouse.p)), "#F00");
           };
